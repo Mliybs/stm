@@ -16,7 +16,7 @@
             "serverExe": "D:\\openocd\bin\\openocd.exe",
             "serverParameters": [],
             "serverHost": "localhost",
-            "serverPort": "",
+            "serverPort": "3333",
             "serverCwd": "",
             "runEntry": "main",
             "imagesAndSymbols": [
