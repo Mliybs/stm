@@ -21,7 +21,11 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "fpr_zn632.h"
+#include <stdint.h>
+#include <stdio.h>
+#include "lcd_ili9341.h"
+#include "lcd_fonts.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -40,13 +44,13 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-ADC_HandleTypeDef hadc1;
-
 DAC_HandleTypeDef hdac;
 
 TIM_HandleTypeDef htim1;
 
 UART_HandleTypeDef huart1;
+
+SRAM_HandleTypeDef hsram1;
 
 /* USER CODE BEGIN PV */
 
@@ -57,14 +61,120 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM1_Init(void);
-static void MX_ADC1_Init(void);
 static void MX_DAC_Init(void);
+static void MX_FSMC_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+typedef enum
+{
+  ATTENDANCE_CHECK_IN = 0,
+  ATTENDANCE_CHECK_OUT = 1
+} AttendanceAction;
+
+static uint8_t s_attendance_checked_in = 0;
+static uint32_t s_attendance_punch_count = 0;
+
+static void Attendance_FormatUptime(char *buffer, uint32_t buffer_len, uint32_t uptime_ms)
+{
+  uint32_t total_seconds = uptime_ms / 1000U;
+  uint32_t hours = total_seconds / 3600U;
+  uint32_t minutes = (total_seconds % 3600U) / 60U;
+  uint32_t seconds = total_seconds % 60U;
+
+  snprintf(buffer, buffer_len, "%02lu:%02lu:%02lu",
+           (unsigned long)hours,
+           (unsigned long)minutes,
+           (unsigned long)seconds);
+}
+
+static void Attendance_ShowMessage(uint16_t text_color,
+                                   const char *line1,
+                                   const char *line2,
+                                   const char *line3,
+                                   const char *line4,
+                                   const char *line5)
+{
+  LCD_SetColors(text_color, BLACK);
+  LCD_Clear(0, 0, LCD_GetLenX(), LCD_GetLenY());
+
+  if (line1 != NULL) {
+    LCD_DispStringEN(8, LINE_EN(0), 0, (char *)line1);
+  }
+  if (line2 != NULL) {
+    LCD_DispStringEN(8, LINE_EN(1), 0, (char *)line2);
+  }
+  if (line3 != NULL) {
+    LCD_DispStringEN(8, LINE_EN(2), 0, (char *)line3);
+  }
+  if (line4 != NULL) {
+    LCD_DispStringEN(8, LINE_EN(3), 0, (char *)line4);
+  }
+  if (line5 != NULL) {
+    LCD_DispStringEN(8, LINE_EN(4), 0, (char *)line5);
+  }
+}
+
+static void Attendance_ShowIdleScreen(void)
+{
+  Attendance_ShowMessage(CYAN,
+                         "Company Attendance Demo",
+                         "Place finger on sensor",
+                         "",
+                         "State: waiting for punch",
+                         "");
+}
+
+static int16_t Attendance_ReadFinger(uint16_t *slot, uint16_t *score)
+{
+  int16_t ret;
+
+  ret = FPR_GetImage();
+  if (ret != FPR_OK) {
+    return ret;
+  }
+
+  ret = FPR_GenChar(1);
+  if (ret != FPR_OK) {
+    return ret;
+  }
+
+  return FPR_HighSpeedSearch(1, slot, score);
+}
+
+static void Attendance_ShowPunchResult(uint16_t slot, uint16_t score, AttendanceAction action)
+{
+  char line[32];
+  char time_buf[16];
+  char emp_buf[32];
+  char slot_buf[32];
+  const char *action_text = (action == ATTENDANCE_CHECK_IN) ? "CHECK-IN" : "CHECK-OUT";
+  uint16_t color = (action == ATTENDANCE_CHECK_IN) ? GREEN : YELLOW;
+
+  Attendance_FormatUptime(time_buf, sizeof(time_buf), HAL_GetTick());
+  snprintf(emp_buf, sizeof(emp_buf), "EMP ID: %04u", (unsigned)(1000U + slot));
+  snprintf(slot_buf, sizeof(slot_buf), "SLOT: %03u  SCORE: %u", (unsigned)slot, (unsigned)score);
+
+  Attendance_ShowMessage(color,
+                         "Punch successful",
+                         emp_buf,
+                         slot_buf,
+                         action_text,
+                         time_buf);
+
+  s_attendance_punch_count++;
+  snprintf(line, sizeof(line), "COUNT: %lu", (unsigned long)s_attendance_punch_count);
+  LCD_DispStringEN(8, LINE_EN(5), 0, line);
+}
+
+static void Attendance_ShowError(const char *line1, const char *line2)
+{
+  Attendance_ShowMessage(RED, line1, line2, "", "", "");
+}
 
 /* USER CODE END 0 */
 
@@ -99,16 +209,72 @@ int main(void)
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   MX_TIM1_Init();
-  MX_ADC1_Init();
   MX_DAC_Init();
+  MX_FSMC_Init();
   /* USER CODE BEGIN 2 */
 
+  LCD_Init();
+  LCD_SetFontEN(&ASCII_8x16);
+  Attendance_ShowMessage(WHITE,
+                         "3.2 inch LCD ready",
+                         "Company attendance mode",
+                         "",
+                         "Initializing fingerprint...",
+                         "");
+
+  int16_t ret;
+
+  ret = FPR_Init(56700);
+  if (ret != FPR_OK) {
+    Attendance_ShowError("Fingerprint init failed", "Check module wiring");
+    while (1) {
+    }
+  }
+
+  ret = FPR_EnrollFinger();
+  if (ret != FPR_OK) {
+    Attendance_ShowError("Fingerprint enroll failed", "Check module wiring");
+    while (1) {
+    }
+  }
+
+  ret = FPR_VerifyPassword(NULL);
+  if (ret != FPR_OK) {
+    Attendance_ShowError("Password verify failed", "Continue demo mode");
+    HAL_Delay(1500);
+  }
+
+  FPR_ReadIndexTable();
+  Attendance_ShowIdleScreen();
+  
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    uint16_t slot = 0;
+    uint16_t score = 0;
+
+    ret = Attendance_ReadFinger(&slot, &score);
+    if (ret == FPR_OK) {
+      AttendanceAction action = (s_attendance_checked_in == 0U) ? ATTENDANCE_CHECK_IN : ATTENDANCE_CHECK_OUT;
+
+      Attendance_ShowPunchResult(slot, score, action);
+      s_attendance_checked_in ^= 1U;
+      HAL_Delay(2000);
+      Attendance_ShowIdleScreen();
+    } else if (ret == FPR_ERROR_NOT_FOUND) {
+      Attendance_ShowError("Finger not registered", "Please try again");
+      HAL_Delay(1200);
+      Attendance_ShowIdleScreen();
+    } else if ((ret == FPR_ERROR_NO_FINGER) || (ret == FPR_ERROR_TIMEOUT)) {
+      HAL_Delay(50);
+    } else {
+      Attendance_ShowError("Fingerprint error", "Please check sensor");
+      HAL_Delay(1200);
+      Attendance_ShowIdleScreen();
+    }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -155,58 +321,6 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-}
-
-/**
-  * @brief ADC1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_ADC1_Init(void)
-{
-
-  /* USER CODE BEGIN ADC1_Init 0 */
-
-  /* USER CODE END ADC1_Init 0 */
-
-  ADC_ChannelConfTypeDef sConfig = {0};
-
-  /* USER CODE BEGIN ADC1_Init 1 */
-
-  /* USER CODE END ADC1_Init 1 */
-
-  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
-  */
-  hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
-  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc1.Init.ScanConvMode = DISABLE;
-  hadc1.Init.ContinuousConvMode = ENABLE;
-  hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 1;
-  hadc1.Init.DMAContinuousRequests = DISABLE;
-  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  if (HAL_ADC_Init(&hadc1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
-  sConfig.Channel = ADC_CHANNEL_3;
-  sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN ADC1_Init 2 */
-
-  /* USER CODE END ADC1_Init 2 */
-
 }
 
 /**
@@ -311,7 +425,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = 56700;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -335,6 +449,7 @@ static void MX_USART1_UART_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
@@ -343,10 +458,85 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_9, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : PA2 */
+  GPIO_InitStruct.Pin = GPIO_PIN_2;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PC9 */
+  GPIO_InitStruct.Pin = GPIO_PIN_9;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
+}
+
+/* FSMC initialization function */
+static void MX_FSMC_Init(void)
+{
+
+  /* USER CODE BEGIN FSMC_Init 0 */
+
+  /* USER CODE END FSMC_Init 0 */
+
+  FSMC_NORSRAM_TimingTypeDef Timing = {0};
+
+  /* USER CODE BEGIN FSMC_Init 1 */
+
+  /* USER CODE END FSMC_Init 1 */
+
+  /** Perform the SRAM1 memory initialization sequence
+  */
+  hsram1.Instance = FSMC_NORSRAM_DEVICE;
+  hsram1.Extended = FSMC_NORSRAM_EXTENDED_DEVICE;
+  /* hsram1.Init */
+  hsram1.Init.NSBank = FSMC_NORSRAM_BANK1;
+  hsram1.Init.DataAddressMux = FSMC_DATA_ADDRESS_MUX_DISABLE;
+  hsram1.Init.MemoryType = FSMC_MEMORY_TYPE_SRAM;
+  hsram1.Init.MemoryDataWidth = FSMC_NORSRAM_MEM_BUS_WIDTH_16;
+  hsram1.Init.BurstAccessMode = FSMC_BURST_ACCESS_MODE_DISABLE;
+  hsram1.Init.WaitSignalPolarity = FSMC_WAIT_SIGNAL_POLARITY_LOW;
+  hsram1.Init.WrapMode = FSMC_WRAP_MODE_DISABLE;
+  hsram1.Init.WaitSignalActive = FSMC_WAIT_TIMING_BEFORE_WS;
+  hsram1.Init.WriteOperation = FSMC_WRITE_OPERATION_ENABLE;
+  hsram1.Init.WaitSignal = FSMC_WAIT_SIGNAL_DISABLE;
+  hsram1.Init.ExtendedMode = FSMC_EXTENDED_MODE_DISABLE;
+  hsram1.Init.AsynchronousWait = FSMC_ASYNCHRONOUS_WAIT_DISABLE;
+  hsram1.Init.WriteBurst = FSMC_WRITE_BURST_DISABLE;
+  hsram1.Init.PageSize = FSMC_PAGE_SIZE_NONE;
+  /* Timing */
+  Timing.AddressSetupTime = 15;
+  Timing.AddressHoldTime = 15;
+  Timing.DataSetupTime = 255;
+  Timing.BusTurnAroundDuration = 15;
+  Timing.CLKDivision = 16;
+  Timing.DataLatency = 17;
+  Timing.AccessMode = FSMC_ACCESS_MODE_A;
+  /* ExtTiming */
+
+  if (HAL_SRAM_Init(&hsram1, &Timing, NULL) != HAL_OK)
+  {
+    Error_Handler( );
+  }
+
+  /* USER CODE BEGIN FSMC_Init 2 */
+
+  /* USER CODE END FSMC_Init 2 */
 }
 
 /* USER CODE BEGIN 4 */
